@@ -218,3 +218,110 @@ impl App {
         self.table_state.select(Some(i));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::CreateKind;
+
+    #[test]
+    fn test_app_initial_state() {
+        let app = App::new(PathBuf::from("/test"), false);
+        assert_eq!(app.records.len(), 0);
+        assert_eq!(app.total_events, 0);
+        assert_eq!(app.sort_mode, SortMode::Recent);
+        assert!(!app.is_paused);
+        assert!(!app.is_filtering);
+        assert_eq!(app.filter_query, "");
+    }
+
+    #[test]
+    fn test_process_event_adds_record() {
+        let mut app = App::new(PathBuf::from("."), false);
+        let mut event = Event::new(EventKind::Create(CreateKind::File));
+        event.paths.push(PathBuf::from("./test_file.rs"));
+
+        app.process_event(event);
+
+        assert_eq!(app.total_events, 1);
+        assert_eq!(app.records.len(), 1);
+        let rec = app.records.values().next().unwrap();
+        assert_eq!(rec.event_type, ChangeType::Created);
+        assert_eq!(rec.change_count, 1);
+    }
+
+    #[test]
+    fn test_filter_query_filters_records() {
+        let mut app = App::new(PathBuf::from("."), false);
+        let mut ev1 = Event::new(EventKind::Create(CreateKind::File));
+        ev1.paths.push(PathBuf::from("./src/main.rs"));
+        app.process_event(ev1);
+
+        let mut ev2 = Event::new(EventKind::Create(CreateKind::File));
+        ev2.paths.push(PathBuf::from("./README.md"));
+        app.process_event(ev2);
+
+        assert_eq!(app.sorted_records().len(), 2);
+
+        app.filter_query = "main".to_string();
+        let filtered = app.sorted_records();
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].display_path.contains("main.rs"));
+
+        app.filter_query = "xyz".to_string();
+        assert_eq!(app.sorted_records().len(), 0);
+    }
+
+    #[test]
+    fn test_pause_freezes_snapshot() {
+        let mut app = App::new(PathBuf::from("."), false);
+        let mut ev1 = Event::new(EventKind::Create(CreateKind::File));
+        ev1.paths.push(PathBuf::from("./first.rs"));
+        app.process_event(ev1);
+
+        app.toggle_pause();
+        assert!(app.is_paused);
+        assert_eq!(app.sorted_records().len(), 1);
+
+        // Add another event while paused
+        let mut ev2 = Event::new(EventKind::Create(CreateKind::File));
+        ev2.paths.push(PathBuf::from("./second.rs"));
+        app.process_event(ev2);
+
+        // Active records has 2, but sorted_records (frozen display) still has 1
+        assert_eq!(app.records.len(), 2);
+        assert_eq!(app.sorted_records().len(), 1);
+
+        app.toggle_pause();
+        assert!(!app.is_paused);
+        assert_eq!(app.sorted_records().len(), 2);
+    }
+
+    #[test]
+    fn test_sorting_modes() {
+        let mut app = App::new(PathBuf::from("."), false);
+        
+        let mut ev1 = Event::new(EventKind::Create(CreateKind::File));
+        ev1.paths.push(PathBuf::from("./b_file.rs"));
+        app.process_event(ev1);
+
+        let mut ev2 = Event::new(EventKind::Create(CreateKind::File));
+        ev2.paths.push(PathBuf::from("./a_file.rs"));
+        app.process_event(ev2);
+
+        // Trigger another event on a_file to give it higher change count
+        let mut ev3 = Event::new(EventKind::Modify(ModifyKind::Any));
+        ev3.paths.push(PathBuf::from("./a_file.rs"));
+        app.process_event(ev3);
+
+        // Sort by Path
+        app.sort_mode = SortMode::Path;
+        let sorted_path = app.sorted_records();
+        assert!(sorted_path[0].display_path < sorted_path[1].display_path);
+
+        // Sort by ChangeCount
+        app.sort_mode = SortMode::ChangeCount;
+        let sorted_count = app.sorted_records();
+        assert!(sorted_count[0].change_count >= sorted_count[1].change_count);
+    }
+}

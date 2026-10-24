@@ -80,3 +80,41 @@ pub fn format_size(bytes: Option<u64>) -> String {
         None => "-".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(None), "-");
+        assert_eq!(format_size(Some(0)), "0 B");
+        assert_eq!(format_size(Some(512)), "512 B");
+        assert_eq!(format_size(Some(1024)), "1.0 KB");
+        assert_eq!(format_size(Some(1536)), "1.5 KB");
+        assert_eq!(format_size(Some(1024 * 1024)), "1.0 MB");
+        assert_eq!(format_size(Some(1024 * 1024 * 1024)), "1.00 GB");
+    }
+
+    #[test]
+    fn test_sort_mode_cycle() {
+        let mut mode = SortMode::Recent;
+        mode = mode.next();
+        assert_eq!(mode, SortMode::ChangeCount);
+        mode = mode.next();
+        assert_eq!(mode, SortMode::Size);
+        mode = mode.next();
+        assert_eq!(mode, SortMode::Path);
+        mode = mode.next();
+        assert_eq!(mode, SortMode::Recent);
+    }
+
+    #[test]
+    fn test_change_type_as_str() {
+        assert_eq!(ChangeType::Created.as_str(), "CREATED");
+        assert_eq!(ChangeType::Modified.as_str(), "MODIFIED");
+        assert_eq!(ChangeType::Deleted.as_str(), "DELETED");
+        assert_eq!(ChangeType::Renamed.as_str(), "RENAMED");
+        assert_eq!(ChangeType::Other.as_str(), "OTHER");
+    }
+}
