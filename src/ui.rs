@@ -190,7 +190,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_viewer_modal(frame: &mut Frame, viewer: &ViewerState, full_area: Rect) {
-    // 85% width and 85% height centered modal
+    // 88% width and 85% height centered modal
     let modal_area = centered_rect(88, 85, full_area);
 
     // Clear underlying screen area
@@ -203,9 +203,11 @@ fn render_viewer_modal(frame: &mut Frame, viewer: &ViewerState, full_area: Rect)
         (viewer.scroll_offset + 1).min(total)
     };
 
+    let mode_badge = if viewer.diff_only { "DIFF-ONLY" } else { "FULL-FILE" };
     let title_line = format!(
-        " {} (Line {}/{} - {}%) ",
+        " {} [Mode: {}] (Line {}/{} - {}%) ",
         viewer.title,
+        mode_badge,
         current_pos,
         total,
         if total == 0 {
@@ -244,7 +246,7 @@ fn render_viewer_modal(frame: &mut Frame, viewer: &ViewerState, full_area: Rect)
 
     let visible_height = text_area.height as usize;
     let lines_to_render: Vec<Line> = viewer
-        .lines
+        .active_lines()
         .iter()
         .skip(viewer.scroll_offset)
         .take(visible_height)
@@ -269,8 +271,10 @@ fn render_viewer_modal(frame: &mut Frame, viewer: &ViewerState, full_area: Rect)
     let content_widget = Paragraph::new(lines_to_render);
     frame.render_widget(content_widget, text_area);
 
-    // Render footer inside modal
+    // Render footer inside modal with Tab toggle hint
     let modal_footer_spans = vec![
+        Span::styled("[Tab/d]", Style::default().fg(Color::Yellow)),
+        Span::raw(if viewer.diff_only { " View Full File  " } else { " View Diff Only  " }),
         Span::styled("[Esc/q/Enter]", Style::default().fg(Color::Yellow)),
         Span::raw(" Close  "),
         Span::styled("[↑/↓, j/k]", Style::default().fg(Color::Yellow)),

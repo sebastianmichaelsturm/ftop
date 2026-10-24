@@ -102,6 +102,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                         let term_height = terminal.size()?.height as usize;
                         let visible_height = term_height.saturating_sub(6).max(1);
                         match key.code {
+                            KeyCode::Tab | KeyCode::Char('d') | KeyCode::Char('t') => {
+                                app.toggle_viewer_diff_mode();
+                            }
                             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
                                 app.close_viewer();
                             }

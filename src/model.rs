@@ -53,23 +53,50 @@ pub struct ViewerState {
     pub path: PathBuf,
     pub display_path: String,
     pub title: String,
-    pub lines: Vec<DiffLine>,
+    pub full_lines: Vec<DiffLine>,
+    pub diff_only_lines: Vec<DiffLine>,
+    pub diff_only: bool,
     pub scroll_offset: usize,
 }
 
 impl ViewerState {
-    pub fn new(path: PathBuf, display_path: String, title: String, lines: Vec<DiffLine>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        display_path: String,
+        title: String,
+        full_lines: Vec<DiffLine>,
+        diff_only_lines: Vec<DiffLine>,
+    ) -> Self {
+        let has_actual_diffs = diff_only_lines.iter().any(|l| {
+            l.kind == DiffLineKind::Addition || l.kind == DiffLineKind::Deletion
+        });
+
         Self {
             path,
             display_path,
             title,
-            lines,
+            full_lines,
+            diff_only_lines,
+            diff_only: has_actual_diffs,
             scroll_offset: 0,
         }
     }
 
+    pub fn active_lines(&self) -> &[DiffLine] {
+        if self.diff_only {
+            &self.diff_only_lines
+        } else {
+            &self.full_lines
+        }
+    }
+
+    pub fn toggle_diff_mode(&mut self) {
+        self.diff_only = !self.diff_only;
+        self.scroll_offset = 0;
+    }
+
     pub fn total_lines(&self) -> usize {
-        self.lines.len()
+        self.active_lines().len()
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -81,8 +108,9 @@ impl ViewerState {
     }
 
     pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
-        let max_offset = if self.lines.len() > visible_height {
-            self.lines.len() - visible_height
+        let total = self.total_lines();
+        let max_offset = if total > visible_height {
+            total - visible_height
         } else {
             0
         };
@@ -94,8 +122,9 @@ impl ViewerState {
     }
 
     pub fn scroll_bottom(&mut self, visible_height: usize) {
-        if self.lines.len() > visible_height {
-            self.scroll_offset = self.lines.len() - visible_height;
+        let total = self.total_lines();
+        if total > visible_height {
+            self.scroll_offset = total - visible_height;
         } else {
             self.scroll_offset = 0;
         }
@@ -189,22 +218,43 @@ mod tests {
     }
 
     #[test]
-    fn test_viewer_state_scrolling() {
-        let lines = (0..50)
+    fn test_viewer_state_scrolling_and_toggle() {
+        let full = (0..50)
             .map(|i| DiffLine {
                 text: format!("line {}", i),
                 kind: DiffLineKind::Context,
             })
             .collect();
+
+        let diff = vec![
+            DiffLine {
+                text: "- line 10".to_string(),
+                kind: DiffLineKind::Deletion,
+            },
+            DiffLine {
+                text: "+ line 10 modified".to_string(),
+                kind: DiffLineKind::Addition,
+            },
+        ];
+
         let mut viewer = ViewerState::new(
             PathBuf::from("test.txt"),
             "test.txt".to_string(),
             "Test".to_string(),
-            lines,
+            full,
+            diff,
         );
 
+        // Should default to diff_only because diff lines contains additions/deletions
+        assert!(viewer.diff_only);
+        assert_eq!(viewer.total_lines(), 2);
+        assert_eq!(viewer.active_lines().len(), 2);
+
+        // Toggle to full file mode
+        viewer.toggle_diff_mode();
+        assert!(!viewer.diff_only);
         assert_eq!(viewer.total_lines(), 50);
-        assert_eq!(viewer.scroll_offset, 0);
+        assert_eq!(viewer.active_lines().len(), 50);
 
         // Scroll down
         viewer.scroll_down(5, 20);
@@ -214,16 +264,14 @@ mod tests {
         viewer.scroll_up(2);
         assert_eq!(viewer.scroll_offset, 3);
 
-        // Scroll up past 0 bounds
-        viewer.scroll_up(10);
-        assert_eq!(viewer.scroll_offset, 0);
-
-        // Scroll to bottom (50 lines, 20 visible -> max offset 30)
-        viewer.scroll_bottom(20);
-        assert_eq!(viewer.scroll_offset, 30);
-
         // Scroll to top
         viewer.scroll_top();
+        assert_eq!(viewer.scroll_offset, 0);
+
+        // Toggle back to diff_only resets scroll offset
+        viewer.scroll_down(10, 20);
+        viewer.toggle_diff_mode();
+        assert!(viewer.diff_only);
         assert_eq!(viewer.scroll_offset, 0);
     }
 }

@@ -190,7 +190,13 @@ impl App {
                     kind: DiffLineKind::Info,
                 },
             ];
-            self.viewer = Some(ViewerState::new(abs_path, display_path, "File Deleted".to_string(), lines));
+            self.viewer = Some(ViewerState::new(
+                abs_path,
+                display_path,
+                "File Deleted".to_string(),
+                lines.clone(),
+                lines,
+            ));
             return;
         }
 
@@ -210,75 +216,109 @@ impl App {
                     kind: DiffLineKind::Info,
                 },
             ];
-            self.viewer = Some(ViewerState::new(abs_path, display_path, "Binary File".to_string(), lines));
+            self.viewer = Some(ViewerState::new(
+                abs_path,
+                display_path,
+                "Binary File".to_string(),
+                lines.clone(),
+                lines,
+            ));
             return;
         }
 
-        // 1. Try Git diff against HEAD
-        if let Some(git_lines) = get_git_diff(&self.root_path, &abs_path) {
-            let title = format!("Git Diff (HEAD) ─ {}", display_path);
-            self.viewer = Some(ViewerState::new(abs_path, display_path, title, git_lines));
-            return;
-        }
-
-        // 2. Try in-memory session diff
-        let prev_content = self.records.get(&abs_path).and_then(|r| r.previous_content.as_ref());
-        if let Some(old) = prev_content {
-            if let Ok(new) = fs::read_to_string(&abs_path) {
-                if old != &new {
-                    let diff = similar::TextDiff::from_lines(old, &new);
-                    let mut lines = Vec::new();
-                    lines.push(DiffLine {
-                        text: format!("Session Diff ─ {}", display_path),
-                        kind: DiffLineKind::Header,
-                    });
-                    for change in diff.iter_all_changes() {
-                        let kind = match change.tag() {
-                            similar::ChangeTag::Delete => DiffLineKind::Deletion,
-                            similar::ChangeTag::Insert => DiffLineKind::Addition,
-                            similar::ChangeTag::Equal => DiffLineKind::Context,
-                        };
-                        let prefix = match change.tag() {
-                            similar::ChangeTag::Delete => "-",
-                            similar::ChangeTag::Insert => "+",
-                            similar::ChangeTag::Equal => " ",
-                        };
-                        let line_val = change.value().trim_end_matches(['\r', '\n']);
-                        lines.push(DiffLine {
-                            text: format!("{}{}", prefix, line_val),
-                            kind,
-                        });
-                    }
-                    let title = format!("Session Diff ─ {}", display_path);
-                    self.viewer = Some(ViewerState::new(abs_path, display_path, title, lines));
-                    return;
-                }
-            }
-        }
-
-        // 3. Fallback: Full file view with line numbers
-        if let Ok(content) = fs::read_to_string(&abs_path) {
-            let lines: Vec<DiffLine> = content
+        // 1. Build full_lines (entire file content with line numbers)
+        let full_lines: Vec<DiffLine> = match fs::read_to_string(&abs_path) {
+            Ok(content) => content
                 .lines()
                 .enumerate()
                 .map(|(i, l)| DiffLine {
                     text: format!("{:4} │ {}", i + 1, l),
                     kind: DiffLineKind::Context,
                 })
-                .collect();
-            let title = format!("File View ─ {}", display_path);
-            self.viewer = Some(ViewerState::new(abs_path, display_path, title, lines));
-        } else {
-            let lines = vec![DiffLine {
+                .collect(),
+            Err(_) => vec![DiffLine {
                 text: format!("Failed to read file: {}", display_path),
                 kind: DiffLineKind::Deletion,
-            }];
-            self.viewer = Some(ViewerState::new(abs_path, display_path, "Error".to_string(), lines));
+            }],
+        };
+
+        // 2. Build diff_only_lines
+        let mut diff_only_lines = Vec::new();
+
+        // 2a. Try Git diff against HEAD
+        if let Some(git_lines) = get_git_diff(&self.root_path, &abs_path) {
+            for line in git_lines {
+                if line.kind == DiffLineKind::Addition
+                    || line.kind == DiffLineKind::Deletion
+                    || line.kind == DiffLineKind::Header
+                {
+                    diff_only_lines.push(line);
+                }
+            }
         }
+
+        // 2b. If no git diff, try in-memory session diff
+        if diff_only_lines.is_empty() {
+            let prev_content = self.records.get(&abs_path).and_then(|r| r.previous_content.as_ref());
+            if let Some(old) = prev_content {
+                if let Ok(new) = fs::read_to_string(&abs_path) {
+                    if old != &new {
+                        let diff = similar::TextDiff::from_lines(old, &new);
+                        diff_only_lines.push(DiffLine {
+                            text: format!("@@ Session Diff: {} @@", display_path),
+                            kind: DiffLineKind::Header,
+                        });
+                        for change in diff.iter_all_changes() {
+                            let kind = match change.tag() {
+                                similar::ChangeTag::Delete => DiffLineKind::Deletion,
+                                similar::ChangeTag::Insert => DiffLineKind::Addition,
+                                similar::ChangeTag::Equal => DiffLineKind::Context,
+                            };
+                            let prefix = match change.tag() {
+                                similar::ChangeTag::Delete => "-",
+                                similar::ChangeTag::Insert => "+",
+                                similar::ChangeTag::Equal => " ",
+                            };
+                            if kind != DiffLineKind::Context {
+                                let line_val = change.value().trim_end_matches(['\r', '\n']);
+                                diff_only_lines.push(DiffLine {
+                                    text: format!("{}{}", prefix, line_val),
+                                    kind,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2c. If still no diff, add clear informative notice
+        if diff_only_lines.is_empty() {
+            diff_only_lines.push(DiffLine {
+                text: "[No line modifications detected in this file. Press Tab to view full file.]"
+                    .to_string(),
+                kind: DiffLineKind::Info,
+            });
+        }
+
+        let title = format!("Diff Viewer ─ {}", display_path);
+        self.viewer = Some(ViewerState::new(
+            abs_path,
+            display_path,
+            title,
+            full_lines,
+            diff_only_lines,
+        ));
     }
 
     pub fn close_viewer(&mut self) {
         self.viewer = None;
+    }
+
+    pub fn toggle_viewer_diff_mode(&mut self) {
+        if let Some(ref mut viewer) = self.viewer {
+            viewer.toggle_diff_mode();
+        }
     }
 
     pub fn scroll_viewer_up(&mut self, amount: usize) {
