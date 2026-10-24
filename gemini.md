@@ -7,7 +7,8 @@
   - `feat/<feature-name>` for new features
   - `fix/<bug-name>` for bug fixes
   - `refactor/<name>` for code restructurings
-- **Merge Procedure:** Following successful implementation and verification, the branch is either cleanly merged into `main` or presented for review.
+- **Automatic Local Reinstallation for Testing:** As soon as the feature/fix is implemented and passes automated unit tests, ALWAYS immediately recompile and reinstall the binary locally (`cargo install --path . --force --offline`) so the user can test the changes in their terminal right away.
+- **Merge Procedure:** DO NOT merge automatically to `main`. Keep the feature branch active until the user has tested the feature manually. Only merge into `main` locally and push after the user gives their explicit approval.
 
 ## 2. Workflow Transparency & Sandbox
 - **Explanation Before Every Step:** Briefly explain what is being done and why before executing each command.
