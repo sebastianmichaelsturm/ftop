@@ -1,10 +1,10 @@
 use crate::app::App;
-use crate::model::{format_size, ChangeType, SortMode};
+use crate::model::{format_size, ChangeType, DiffLineKind, SortMode, ViewerState};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
     Frame,
 };
 
@@ -21,6 +21,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     render_header(frame, app, chunks[0]);
     render_table(frame, app, chunks[1]);
     render_footer(frame, app, chunks[2]);
+
+    // Render in-terminal file/diff viewer modal if open
+    if let Some(ref viewer) = app.viewer {
+        render_viewer_modal(frame, viewer, frame.area());
+    }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -167,7 +172,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("[s]", Style::default().fg(Color::Yellow)),
             Span::raw(" Sort  "),
             Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Open  "),
+            Span::raw(" View/Diff  "),
             Span::styled("[c]", Style::default().fg(Color::Yellow)),
             Span::raw(" Clear  "),
             Span::styled("[↑/↓, j/k]", Style::default().fg(Color::Yellow)),
@@ -182,4 +187,120 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.render_widget(footer, area);
+}
+
+fn render_viewer_modal(frame: &mut Frame, viewer: &ViewerState, full_area: Rect) {
+    // 85% width and 85% height centered modal
+    let modal_area = centered_rect(88, 85, full_area);
+
+    // Clear underlying screen area
+    frame.render_widget(Clear, modal_area);
+
+    let total = viewer.total_lines();
+    let current_pos = if total == 0 {
+        0
+    } else {
+        (viewer.scroll_offset + 1).min(total)
+    };
+
+    let title_line = format!(
+        " {} (Line {}/{} - {}%) ",
+        viewer.title,
+        current_pos,
+        total,
+        if total == 0 {
+            100
+        } else {
+            (current_pos * 100) / total
+        }
+    );
+
+    let modal_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            title_line,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner_area = modal_block.inner(modal_area);
+    frame.render_widget(modal_block, modal_area);
+
+    if inner_area.height == 0 || inner_area.width == 0 {
+        return;
+    }
+
+    // Split inner area into text area and bottom keybinding bar
+    let content_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // Scrollable diff content
+            Constraint::Length(1), // Viewer keybinding footer
+        ])
+        .split(inner_area);
+
+    let text_area = content_chunks[0];
+    let footer_area = content_chunks[1];
+
+    let visible_height = text_area.height as usize;
+    let lines_to_render: Vec<Line> = viewer
+        .lines
+        .iter()
+        .skip(viewer.scroll_offset)
+        .take(visible_height)
+        .map(|diff_line| {
+            let style = match diff_line.kind {
+                DiffLineKind::Addition => {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                }
+                DiffLineKind::Deletion => {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                }
+                DiffLineKind::Header => {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                }
+                DiffLineKind::Context => Style::default().fg(Color::White),
+                DiffLineKind::Info => Style::default().fg(Color::Yellow),
+            };
+            Line::styled(&diff_line.text, style)
+        })
+        .collect();
+
+    let content_widget = Paragraph::new(lines_to_render);
+    frame.render_widget(content_widget, text_area);
+
+    // Render footer inside modal
+    let modal_footer_spans = vec![
+        Span::styled("[Esc/q/Enter]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Close  "),
+        Span::styled("[↑/↓, j/k]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Scroll  "),
+        Span::styled("[PgUp/PgDn]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Page  "),
+        Span::styled("[g/G]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Top/Bottom"),
+    ];
+    let modal_footer_widget = Paragraph::new(Line::from(modal_footer_spans))
+        .style(Style::default().bg(Color::Rgb(30, 34, 42)));
+    frame.render_widget(modal_footer_widget, footer_area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

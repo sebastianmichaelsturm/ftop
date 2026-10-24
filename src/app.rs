@@ -1,12 +1,12 @@
 use crate::filter::should_ignore;
-use crate::model::{ChangeType, FileRecord, SortMode};
+use crate::model::{ChangeType, DiffLine, DiffLineKind, FileRecord, SortMode, ViewerState};
 use chrono::Local;
 use notify::event::ModifyKind;
 use notify::{Event, EventKind};
 use ratatui::widgets::TableState;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub struct App {
@@ -21,6 +21,7 @@ pub struct App {
     pub frozen_records: Option<Vec<FileRecord>>,
     pub filter_query: String,
     pub is_filtering: bool,
+    pub viewer: Option<ViewerState>,
 }
 
 impl App {
@@ -40,6 +41,7 @@ impl App {
             frozen_records: None,
             filter_query: String::new(),
             is_filtering: false,
+            viewer: None,
         }
     }
 
@@ -79,12 +81,22 @@ impl App {
             let now = Local::now();
             let entry = self.records.entry(path.clone()).or_insert_with(|| FileRecord {
                 display_path: if display_str.is_empty() { ".".to_string() } else { display_str },
-                absolute_path: path,
+                absolute_path: path.clone(),
                 event_type: change_type,
                 change_count: 0,
                 size_bytes: size,
                 last_updated: now,
+                previous_content: None,
             });
+
+            // Capture initial baseline if not captured yet
+            if entry.previous_content.is_none() && path.is_file() {
+                if let Ok(meta) = fs::metadata(&path) {
+                    if meta.len() < 500 * 1024 && !is_binary_file(&path) {
+                        entry.previous_content = fs::read_to_string(&path).ok();
+                    }
+                }
+            }
 
             entry.event_type = change_type;
             entry.change_count += 1;
@@ -151,34 +163,145 @@ impl App {
         self.table_state.select(Some(0));
     }
 
-    pub fn get_selected_file(&self) -> Option<PathBuf> {
+    pub fn get_selected_file_record(&self) -> Option<&FileRecord> {
         let list = self.sorted_records();
         let idx = self.table_state.selected()?;
-        list.get(idx).map(|rec| rec.absolute_path.clone())
+        list.get(idx).copied()
     }
 
-    pub fn open_selected(&self) {
-        if let Some(path) = self.get_selected_file() {
-            if path.exists() {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &path.to_string_lossy()])
-                        .spawn();
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("open").arg(path).spawn();
-                }
-                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-                {
-                    if let Ok(editor) = std::env::var("EDITOR") {
-                        let _ = std::process::Command::new(editor).arg(path).spawn();
-                    } else {
-                        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    pub fn get_selected_file(&self) -> Option<PathBuf> {
+        self.get_selected_file_record().map(|r| r.absolute_path.clone())
+    }
+
+    pub fn open_viewer(&mut self) {
+        let (abs_path, display_path) = match self.get_selected_file_record() {
+            Some(rec) => (rec.absolute_path.clone(), rec.display_path.clone()),
+            None => return,
+        };
+
+        if !abs_path.exists() {
+            let lines = vec![
+                DiffLine {
+                    text: format!("File does not exist on disk: {}", display_path),
+                    kind: DiffLineKind::Deletion,
+                },
+                DiffLine {
+                    text: "The file was either deleted or moved.".to_string(),
+                    kind: DiffLineKind::Info,
+                },
+            ];
+            self.viewer = Some(ViewerState::new(abs_path, display_path, "File Deleted".to_string(), lines));
+            return;
+        }
+
+        if is_binary_file(&abs_path) {
+            let size = fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
+            let lines = vec![
+                DiffLine {
+                    text: format!("Binary file: {}", display_path),
+                    kind: DiffLineKind::Header,
+                },
+                DiffLine {
+                    text: format!("Size: {} ({} bytes)", crate::model::format_size(Some(size)), size),
+                    kind: DiffLineKind::Info,
+                },
+                DiffLine {
+                    text: "Binary files cannot be rendered as text diff in terminal.".to_string(),
+                    kind: DiffLineKind::Info,
+                },
+            ];
+            self.viewer = Some(ViewerState::new(abs_path, display_path, "Binary File".to_string(), lines));
+            return;
+        }
+
+        // 1. Try Git diff against HEAD
+        if let Some(git_lines) = get_git_diff(&self.root_path, &abs_path) {
+            let title = format!("Git Diff (HEAD) ─ {}", display_path);
+            self.viewer = Some(ViewerState::new(abs_path, display_path, title, git_lines));
+            return;
+        }
+
+        // 2. Try in-memory session diff
+        let prev_content = self.records.get(&abs_path).and_then(|r| r.previous_content.as_ref());
+        if let Some(old) = prev_content {
+            if let Ok(new) = fs::read_to_string(&abs_path) {
+                if old != &new {
+                    let diff = similar::TextDiff::from_lines(old, &new);
+                    let mut lines = Vec::new();
+                    lines.push(DiffLine {
+                        text: format!("Session Diff ─ {}", display_path),
+                        kind: DiffLineKind::Header,
+                    });
+                    for change in diff.iter_all_changes() {
+                        let kind = match change.tag() {
+                            similar::ChangeTag::Delete => DiffLineKind::Deletion,
+                            similar::ChangeTag::Insert => DiffLineKind::Addition,
+                            similar::ChangeTag::Equal => DiffLineKind::Context,
+                        };
+                        let prefix = match change.tag() {
+                            similar::ChangeTag::Delete => "-",
+                            similar::ChangeTag::Insert => "+",
+                            similar::ChangeTag::Equal => " ",
+                        };
+                        let line_val = change.value().trim_end_matches(['\r', '\n']);
+                        lines.push(DiffLine {
+                            text: format!("{}{}", prefix, line_val),
+                            kind,
+                        });
                     }
+                    let title = format!("Session Diff ─ {}", display_path);
+                    self.viewer = Some(ViewerState::new(abs_path, display_path, title, lines));
+                    return;
                 }
             }
+        }
+
+        // 3. Fallback: Full file view with line numbers
+        if let Ok(content) = fs::read_to_string(&abs_path) {
+            let lines: Vec<DiffLine> = content
+                .lines()
+                .enumerate()
+                .map(|(i, l)| DiffLine {
+                    text: format!("{:4} │ {}", i + 1, l),
+                    kind: DiffLineKind::Context,
+                })
+                .collect();
+            let title = format!("File View ─ {}", display_path);
+            self.viewer = Some(ViewerState::new(abs_path, display_path, title, lines));
+        } else {
+            let lines = vec![DiffLine {
+                text: format!("Failed to read file: {}", display_path),
+                kind: DiffLineKind::Deletion,
+            }];
+            self.viewer = Some(ViewerState::new(abs_path, display_path, "Error".to_string(), lines));
+        }
+    }
+
+    pub fn close_viewer(&mut self) {
+        self.viewer = None;
+    }
+
+    pub fn scroll_viewer_up(&mut self, amount: usize) {
+        if let Some(ref mut viewer) = self.viewer {
+            viewer.scroll_up(amount);
+        }
+    }
+
+    pub fn scroll_viewer_down(&mut self, amount: usize, visible_height: usize) {
+        if let Some(ref mut viewer) = self.viewer {
+            viewer.scroll_down(amount, visible_height);
+        }
+    }
+
+    pub fn scroll_viewer_top(&mut self) {
+        if let Some(ref mut viewer) = self.viewer {
+            viewer.scroll_top();
+        }
+    }
+
+    pub fn scroll_viewer_bottom(&mut self, visible_height: usize) {
+        if let Some(ref mut viewer) = self.viewer {
+            viewer.scroll_bottom(visible_height);
         }
     }
 
@@ -219,6 +342,73 @@ impl App {
     }
 }
 
+fn is_binary_file(path: &Path) -> bool {
+    // Check known binary extensions first
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext_lower = ext.to_lowercase();
+        if matches!(
+            ext_lower.as_str(),
+            "exe" | "dll" | "so" | "dylib" | "bin" | "png" | "jpg" | "jpeg" | "gif" | "ico"
+                | "pdf" | "zip" | "tar" | "gz" | "7z" | "woff" | "woff2" | "ttf" | "pdb"
+        ) {
+            return true;
+        }
+    }
+    // Inspect first 1024 bytes for null bytes
+    if let Ok(mut file) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 1024];
+        if let Ok(n) = file.read(&mut buf) {
+            return buf[..n].contains(&0);
+        }
+    }
+    false
+}
+
+fn get_git_diff(repo_root: &Path, file_path: &Path) -> Option<Vec<DiffLine>> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["diff", "HEAD", "--"])
+        .arg(file_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    let diff_text = String::from_utf8_lossy(&output.stdout);
+    if diff_text.trim().is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for raw_line in diff_text.lines() {
+        let kind = if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
+            DiffLineKind::Addition
+        } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
+            DiffLineKind::Deletion
+        } else if raw_line.starts_with("@@")
+            || raw_line.starts_with("diff ")
+            || raw_line.starts_with("index ")
+        {
+            DiffLineKind::Header
+        } else {
+            DiffLineKind::Context
+        };
+        lines.push(DiffLine {
+            text: raw_line.to_string(),
+            kind,
+        });
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +423,7 @@ mod tests {
         assert!(!app.is_paused);
         assert!(!app.is_filtering);
         assert_eq!(app.filter_query, "");
+        assert!(app.viewer.is_none());
     }
 
     #[test]
@@ -300,7 +491,7 @@ mod tests {
     #[test]
     fn test_sorting_modes() {
         let mut app = App::new(PathBuf::from("."), false);
-        
+
         let mut ev1 = Event::new(EventKind::Create(CreateKind::File));
         ev1.paths.push(PathBuf::from("./b_file.rs"));
         app.process_event(ev1);
@@ -323,5 +514,15 @@ mod tests {
         app.sort_mode = SortMode::ChangeCount;
         let sorted_count = app.sorted_records();
         assert!(sorted_count[0].change_count >= sorted_count[1].change_count);
+    }
+
+    #[test]
+    fn test_binary_detection() {
+        let exe_path = PathBuf::from("test.exe");
+        assert!(is_binary_file(&exe_path));
+
+        let rs_path = PathBuf::from("test.rs");
+        // Non-existent or empty text file
+        assert!(!is_binary_file(&rs_path));
     }
 }

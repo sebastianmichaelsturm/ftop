@@ -98,7 +98,34 @@ fn run_loop<B: ratatui::backend::Backend>(
         if event::poll(Duration::from_millis(33))? {
             if let CEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if app.is_filtering {
+                    if app.viewer.is_some() {
+                        let term_height = terminal.size()?.height as usize;
+                        let visible_height = term_height.saturating_sub(6).max(1);
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                                app.close_viewer();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.scroll_viewer_down(1, visible_height);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.scroll_viewer_up(1);
+                            }
+                            KeyCode::PageDown | KeyCode::Char('f') => {
+                                app.scroll_viewer_down(visible_height.saturating_sub(2).max(1), visible_height);
+                            }
+                            KeyCode::PageUp | KeyCode::Char('b') => {
+                                app.scroll_viewer_up(visible_height.saturating_sub(2).max(1));
+                            }
+                            KeyCode::Home | KeyCode::Char('g') => {
+                                app.scroll_viewer_top();
+                            }
+                            KeyCode::End | KeyCode::Char('G') => {
+                                app.scroll_viewer_bottom(visible_height);
+                            }
+                            _ => {}
+                        }
+                    } else if app.is_filtering {
                         match key.code {
                             KeyCode::Esc => {
                                 app.is_filtering = false;
@@ -129,7 +156,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             KeyCode::Char(' ') => app.toggle_pause(),
                             KeyCode::Char('/') => app.is_filtering = true,
-                            KeyCode::Enter => app.open_selected(),
+                            KeyCode::Enter => app.open_viewer(),
                             KeyCode::Char('s') => app.cycle_sort(),
                             KeyCode::Char('c') => app.clear(),
                             KeyCode::Down | KeyCode::Char('j') => app.next_row(),

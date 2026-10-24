@@ -30,6 +30,76 @@ pub struct FileRecord {
     pub change_count: u64,
     pub size_bytes: Option<u64>,
     pub last_updated: DateTime<Local>,
+    pub previous_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Addition, // Green (+)
+    Deletion, // Red (-)
+    Header,   // Cyan (@@, diff headers)
+    Context,  // Normal text
+    Info,     // Yellow / Gray notice
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub text: String,
+    pub kind: DiffLineKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewerState {
+    pub path: PathBuf,
+    pub display_path: String,
+    pub title: String,
+    pub lines: Vec<DiffLine>,
+    pub scroll_offset: usize,
+}
+
+impl ViewerState {
+    pub fn new(path: PathBuf, display_path: String, title: String, lines: Vec<DiffLine>) -> Self {
+        Self {
+            path,
+            display_path,
+            title,
+            lines,
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn total_lines(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn scroll_up(&mut self, amount: usize) {
+        if self.scroll_offset >= amount {
+            self.scroll_offset -= amount;
+        } else {
+            self.scroll_offset = 0;
+        }
+    }
+
+    pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
+        let max_offset = if self.lines.len() > visible_height {
+            self.lines.len() - visible_height
+        } else {
+            0
+        };
+        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
+    }
+
+    pub fn scroll_top(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    pub fn scroll_bottom(&mut self, visible_height: usize) {
+        if self.lines.len() > visible_height {
+            self.scroll_offset = self.lines.len() - visible_height;
+        } else {
+            self.scroll_offset = 0;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,5 +186,44 @@ mod tests {
         assert_eq!(ChangeType::Deleted.as_str(), "DELETED");
         assert_eq!(ChangeType::Renamed.as_str(), "RENAMED");
         assert_eq!(ChangeType::Other.as_str(), "OTHER");
+    }
+
+    #[test]
+    fn test_viewer_state_scrolling() {
+        let lines = (0..50)
+            .map(|i| DiffLine {
+                text: format!("line {}", i),
+                kind: DiffLineKind::Context,
+            })
+            .collect();
+        let mut viewer = ViewerState::new(
+            PathBuf::from("test.txt"),
+            "test.txt".to_string(),
+            "Test".to_string(),
+            lines,
+        );
+
+        assert_eq!(viewer.total_lines(), 50);
+        assert_eq!(viewer.scroll_offset, 0);
+
+        // Scroll down
+        viewer.scroll_down(5, 20);
+        assert_eq!(viewer.scroll_offset, 5);
+
+        // Scroll up
+        viewer.scroll_up(2);
+        assert_eq!(viewer.scroll_offset, 3);
+
+        // Scroll up past 0 bounds
+        viewer.scroll_up(10);
+        assert_eq!(viewer.scroll_offset, 0);
+
+        // Scroll to bottom (50 lines, 20 visible -> max offset 30)
+        viewer.scroll_bottom(20);
+        assert_eq!(viewer.scroll_offset, 30);
+
+        // Scroll to top
+        viewer.scroll_top();
+        assert_eq!(viewer.scroll_offset, 0);
     }
 }
